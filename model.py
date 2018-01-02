@@ -1,186 +1,131 @@
-# Load the modules
-import pickle
-import math
+import cv2
+import csv
 import numpy as np
-import tensorflow as tf
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-# Import keras deep learning libraries
-import json
-from keras.models import Sequential, model_from_json
-from keras.layers import Dense, Dropout, Activation, Flatten
-from keras.layers import Convolution2D, MaxPooling2D
-from keras.optimizers import SGD, Adam, RMSprop
-from keras.utils import np_utils
-from keras import backend as K
 
-# Reload the data
-pickle_file = 'camera.pickle'
-with open(pickle_file, 'rb') as f:
-    pickle_data = pickle.load(f)
-    X_train = pickle_data['train_dataset']
-    y_train = pickle_data['train_labels']
-    X_valid = pickle_data['valid_dataset']
-    y_valid = pickle_data['valid_labels']
-    X_test = pickle_data['test_dataset']
-    y_test = pickle_data['test_labels']
-    del pickle_data  # Free up memory
+import sklearn
+from sklearn.model_selection import train_test_split
+from sklearn.utils import shuffle
 
-# Print shapes of arrays that are imported
-print('Data and modules loaded.')
-print("train_features size:", X_train.shape)
-print("train_labels size:", y_train.shape)
-print("valid_features size:", X_valid.shape)
-print("valid_labels size:", y_valid.shape)
-print("test_features size:", X_test.shape)
-print("test_labels size:", y_test.shape)
+from keras.models import Sequential
+from keras.layers import Flatten, Dense, Lambda, Convolution2D, Cropping2D, Dropout
 
-# the data, shuffled and split between train and test sets
-X_train = X_train.astype('float32')
-X_valid = X_valid.astype('float32')
-X_test  = X_test.astype('float32')
-X_train /= 255
-X_valid /= 255
-X_test  /= 255
-X_train -= 0.5
-X_valid -= 0.5
-X_test  -= 0.5
+path = './data/'  # fill in the path to your training IMG directory
 
-# This is the shape of the image
-input_shape = X_train.shape[1:]
-print(input_shape, 'input shape')
+#-----------------------------------------------------------------------------------------
 
-# Set the parameters and print out the summary of the model
-np.random.seed(1337)  # for reproducibility
+ # READ CSV and LOAD DATA
 
-batch_size = 64 # The lower the better
-nb_classes = 1 # The output is a single digit: a steering angle
-nb_epoch = 10 # The higher the better
+car_images = []
+steering_angles = []
+with open(path + 'driving_log.csv') as csvFile:
+    reader = csv.reader(csvFile)
+    for line in reader:
+        steering_center = float(line[3])
 
-# import model and wieghts if exists
-try:
-	with open('model.json', 'r') as jfile:
-	    model = model_from_json(json.load(jfile))
+        # create adjusted steering measurements for the side camera images
+        correction = 0.2  # this is a parameter to tune
+        steering_left = steering_center + correction
+        steering_right = steering_center - correction
 
-	# Use adam and mean squared error for training
-	model.compile("adam", "mse")
+        # read in images from center, left and right cameras
+        img_center = line[0]
+        img_left = line[1]
+        img_right = line[2]
 
-	# import weights
-	model.load_weights('model.h5')
+        # add images and angles to data set
+        car_images.append(img_center)
+        car_images.append(img_left)
+        car_images.append(img_right)
+        steering_angles.append(steering_center)
+        steering_angles.append(steering_left)
+        steering_angles.append(steering_right)
 
-	print("Imported model and weights")
+#-----------------------------------------------------------------------------------------
 
-# If the model and weights do not exist, create a new model
-except:
-	# If model and weights do not exist in the local folder,
-	# initiate a model
+def CNNModel():
+    # Modified Nvidia Model
+    # Difference to the Nvidia Model is the cropping and the dropout layers
+    model = Sequential()
+    model.add(Cropping2D(cropping=((70, 25), (0, 0)), input_shape = (160, 320, 3)))
+    # normalize data
+    model.add(Lambda(lambda x: (x / 255) - 0.5, input_shape=(160,320,3)))
+    model.add(Convolution2D(24,5,5, subsample=(2,2), activation='relu'))
+    model.add(Convolution2D(36,5,5, subsample=(2,2), activation='relu'))
+    model.add(Convolution2D(48,5,5, subsample=(2,2), activation='relu'))
+    model.add(Convolution2D(64,3,3, activation='relu'))
+    model.add(Convolution2D(64,3,3, activation='relu'))
+    model.add(Flatten())
+    model.add(Dropout(0.5))
+    model.add(Dense(100))
+    model.add(Dense(50))
+    model.add(Dropout(0.5))
+    model.add(Dense(10))
+    model.add(Dense(1))
+    return model
 
-	# number of convolutional filters to use
-	nb_filters1 = 16
-	nb_filters2 = 8
-	nb_filters3 = 4
-	nb_filters4 = 2
+#-----------------------------------------------------------------------------------------
 
-	# size of pooling area for max pooling
-	pool_size = (2, 2)
+def generatorData(samples, batch_size=32):
+    num_samples = len(samples)
+    while 1: # Loop forever so the generator never terminates
+        samples = sklearn.utils.shuffle(samples)
+        for offset in range(0, num_samples, batch_size):
+            batch_samples = samples[offset:offset+batch_size]
 
-	# convolution kernel size
-	kernel_size = (3, 3)
+            images = []
+            angles = []
+            for imagePath, measurement in batch_samples:
+                originalImage = cv2.imread(imagePath)
+                image = cv2.cvtColor(originalImage, cv2.COLOR_BGR2RGB)
+                images.append(image)
+                angles.append(measurement)
+                # Flipping image, correcting measurement and adding that measuerement
+                images.append(cv2.flip(image,1))
+                angles.append(measurement*-1.0)
 
-	# Initiating the model
-	model = Sequential()
+            inputs = np.array(images)
+            outputs = np.array(angles)
+            yield sklearn.utils.shuffle(inputs, outputs)
 
-	# Starting with the convolutional layer
-	# The first layer will turn 1 channel into 16 channels
-	model.add(Convolution2D(nb_filters1, kernel_size[0], kernel_size[1],
-	                        border_mode='valid',
-	                        input_shape=input_shape))
-	# Applying ReLU
-	model.add(Activation('relu'))
-	# The second conv layer will convert 16 channels into 8 channels
-	model.add(Convolution2D(nb_filters2, kernel_size[0], kernel_size[1]))
-	# Applying ReLU
-	model.add(Activation('relu'))
-	# The second conv layer will convert 8 channels into 4 channels
-	model.add(Convolution2D(nb_filters3, kernel_size[0], kernel_size[1]))
-	# Applying ReLU
-	model.add(Activation('relu'))
-	# The second conv layer will convert 4 channels into 2 channels
-	model.add(Convolution2D(nb_filters4, kernel_size[0], kernel_size[1]))
-	# Applying ReLU
-	model.add(Activation('relu'))
-	# Apply Max Pooling for each 2 x 2 pixels
-	model.add(MaxPooling2D(pool_size=pool_size))
-	# Apply dropout of 25%
-	model.add(Dropout(0.25))
+#-----------------------------------------------------------------------------------------
+# Splitting into train and valdiation data
 
-	# Flatten the matrix. The input has size of 360
-	model.add(Flatten())
-	# Input 360 Output 16
-	model.add(Dense(16))
-	# Applying ReLU
-	model.add(Activation('relu'))
-	# Input 16 Output 16
-	model.add(Dense(16))
-	# Applying ReLU
-	model.add(Activation('relu'))
-	# Input 16 Output 16
-	model.add(Dense(16))
-	# Applying ReLU
-	model.add(Activation('relu'))
-	# Apply dropout of 50%
-	model.add(Dropout(0.5))
-	# Input 16 Output 1
-	model.add(Dense(nb_classes))
+print('Total Images: {}'.format( len(car_images)))
 
-# Print out summary of the model
-model.summary()
+# Splitting samples and creating generators.
+samples = list(zip(car_images, steering_angles))
+train_samples, validation_samples = train_test_split(samples, test_size=0.2)
 
-# Compile model using Adam optimizer 
-# and loss computed by mean squared error
-model.compile(loss='mean_squared_error',
-              optimizer=Adam(),
-              metrics=['accuracy'])
+print('Train samples: {}'.format(len(train_samples)))
+print('Validation samples: {}'.format(len(validation_samples)))
 
-### Model training
-history = model.fit(X_train, y_train,
-                    batch_size=batch_size, nb_epoch=nb_epoch,
-                    verbose=1, validation_data=(X_valid, y_valid))
-score = model.evaluate(X_test, y_test, verbose=0)
-print('Test score:', score[0])
-print('Test accuracy:', score[1])
+#-----------------------------------------------------------------------------------------
 
-import json
-import os
-import h5py
+training_generator = generatorData(train_samples, batch_size=32)
+validation_generator = generatorData(validation_samples, batch_size=32)
 
-# Save the model.
-# If the model.json file already exists in the local file,
-# warn the user to make sure if user wants to overwrite the model.
-if 'model.json' in os.listdir():
-	print("The file already exists")
-	print("Want to overwite? y or n")
-	user_input = input()
+print('Training model...')
 
-	if user_input == "y":
-		# Save model as json file
-		json_string = model.to_json()
+model = CNNModel()
+model.compile(loss='mse', optimizer='adam')
 
-		with open('model.json', 'w') as outfile:
-			json.dump(json_string, outfile)
+history_object = model.fit_generator(training_generator, samples_per_epoch= \
+                 len(train_samples), validation_data=validation_generator, \
+                 nb_val_samples=len(validation_samples), nb_epoch=15, verbose=1)
 
-			# save weights
-			model.save_weights('./model.h5')
-			print("Overwrite Successful")
-	else:
-		print("the model is not saved")
-else:
-	# Save model as json file
-	json_string = model.to_json()
+print(history_object.history.keys())
+print('Loss')
+print(history_object.history['loss'])
+print('Validation Loss')
+print(history_object.history['val_loss'])
 
-	with open('model.json', 'w') as outfile:
-		json.dump(json_string, outfile)
+#-----------------------------------------------------------------------------------------
 
-		# save weights
-		model.save_weights('./model.h5')
-		print("Saved")
+print('Saving model...')
+
+model.save("model.h5")
+
+with open("model.json", "w") as json_file:
+  json_file.write(model.to_json())
+
+print("Model Saved.")
